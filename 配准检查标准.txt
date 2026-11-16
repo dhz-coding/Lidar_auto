@@ -1,0 +1,34 @@
+多点位配准检查与重试（两遍流程）
+
+1. 第一遍依次将扫描配准到当前 Global Cloud。
+   曲率 ROI + FPFH/RANSAC + ICP 只负责求解变换。
+   完整点云按 validation.voxel_size 固定下采样；每对所有尝试共用验证快照。
+   用 validation.distance_threshold 做双向最近邻评价，无需标准变换或固定结构模型。
+   双向 fitness >= min_fitness、RMSE <= max_rmse、对应点数足够时合并。
+   只达到 review_min_fitness/review_max_rmse 时保留多个不同位姿候选，暂不合并。
+   候选按固定验证的截断误差和覆盖情况排序，不采用加权打分。
+
+2. 第二遍只复核有候选且第一遍未合并的扫描。
+   冻结第一遍通过的扫描和全局位姿，不让待确认扫描互相作证。
+   原始待复核扫描独立配准到参考扫描，严格验证该点云对。
+   参考扫描到全局的变换 × 独立配准变换，得到新的全局估计。
+   若与某个保留候选的平移/旋转差异在 candidate_review 阈值内，且新矩阵在冻结全局参考上
+   至少达到复核底线，则采用这份已独立验证的新矩阵合并。
+   同时保存原候选、独立配准、新矩阵及复核指标。未确认扫描不合并，但保留原因。
+
+3. 最后一个成功合并的扫描独立配准到首扫描，比较直接变换和已采用的全局变换。
+   闭环差异超过 loop_closure 的平移/旋转阈值，或直接配准不能确认时，从头重跑整组。
+   最多重跑轮数由 max_pipeline_attempts 控制。
+   若原来本就直接配准到首帧，记录为 pair_repeatability，不冒充独立多边闭环。
+   除首帧外没有成功扫描时，无法验证闭环；不能用单位矩阵宣布通过。
+
+4. 完整成功 complete：全部扫描合并，且配置要求的闭环通过。
+   部分成功 partial：部分扫描未合并，但已合并结果通过本轮检查；允许继续体积流程。
+   failed：本轮检查未通过，按整组重试策略处理。
+   报告记录缺失扫描、复核来源、闭环类型、全部候选和每轮结果。
+   单扫描输入单独标记为 complete 并跳过多点位闭环。
+
+实现：registration_validation.py、registration_multiview.py、v_measure.py。
+参数：config.yaml / multi_view_registration.validation、candidate_review、loop_closure。
+标准变换仅用于 try 的离线测试，运行时没有标准变换依赖。
+几何和一致性指标不能排除所有对称错配；partial 不表示所有输入视角均已成功。
